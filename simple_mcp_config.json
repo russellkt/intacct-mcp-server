@@ -1,0 +1,11 @@
+{
+  "intacct-mcp": {
+    "command": "uv",
+    "args": [
+      "--directory",
+      "/ABSOLUTE/PATH/TO/DIRECTORY",
+      "run",
+      "intacct_mcp_stdio.py"
+    ]
+  }
+}
