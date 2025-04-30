@@ -145,16 +145,15 @@ To use this MCP server with Claude Desktop:
 The `simple_mcp_config.json` file describes the MCP server capabilities and how to run it:
 
 ```json
-{
-  "id": "intacct-mcp",
-  "name": "Intacct MCP Server",
-  "description": "MCP server for Intacct API integration",
-  "transport": "stdio",
-  "server": {
+"intacct-mcp": {
     "command": "uv",
-    "args": ["--directory", "${__dirname}", "run", "intacct_mcp_stdio.py"]
+    "args": [
+      "--directory",
+      "/ABSOLUTE/PATH/TO/DIRECTORY",
+      "run",
+      "intacct_mcp_stdio.py"
+    ]
   }
-}
 ```
 
 This file tells Claude Desktop how to launch the server and what capabilities it provides.
