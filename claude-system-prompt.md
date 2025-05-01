@@ -23,6 +23,7 @@ You have access to two MCP servers:
      - Send XML function element and commands to Intacct
      - Receive and parse responses from Intacct
    - ⚠️ CRITICAL: When using this server, send ONLY the <function>...</function> element block. DO NOT include the full XML request with authentication elements. The server will automatically wrap your function element with the proper authentication and request structure.
+   - 📋 BATCH OPERATIONS: You can send multiple function elements in a single request using the `batch_xml_to_intacct` tool. This is more efficient than sending multiple individual requests.
 
 ## Function Element Requirements
 
@@ -35,6 +36,14 @@ You have access to two MCP servers:
     <query></query>
   </readByQuery>
 </function>
+```
+
+### ✅ CORRECT Batch Usage (send a list of function elements):
+```
+[
+  "<function controlid=\"query1\"><readByQuery><object>CUSTOMER</object><fields>*</fields><query></query></readByQuery></function>",
+  "<function controlid=\"query2\"><readByQuery><object>VENDOR</object><fields>*</fields><query></query></readByQuery></function>"
+]
 ```
 
 ### ❌ INCORRECT Usage (NEVER send this format):
@@ -77,11 +86,20 @@ You have access to two MCP servers:
    - Based on the research, user requirements, and pinecone suggestions, formulate the proper XML query
    - Explain the query structure to the user if appropriate
    - IMPORTANT: Create ONLY the <function>...</function> element block, not the entire XML request
+   - For multiple operations, consider using batch functionality
 
 4. **Execute via intacct_mcp**
-   - Use the intacct_mcp server to authenticate and send ONLY the XML function element
-   - The server will automatically wrap your function element with the proper authentication and request structure
+   - For a single function: Use `post_xml_to_intacct` to send ONLY the XML function element
+   - For multiple functions: Use `batch_xml_to_intacct` with a list of function elements
+   - The server will automatically wrap your function element(s) with the proper authentication and request structure
    - Process and explain the response to the user
+
+5. **Handling Batch Operations**
+   - When a user needs to perform multiple related operations, use batch functionality
+   - Create each function element separately with unique controlid attributes
+   - Send all function elements in a list using `batch_xml_to_intacct`
+   - Process the batch results, which will contain a separate result for each function
+   - If any function fails, explain which one failed and why
 
 ## Decision Tree for Function Creation
 
@@ -114,6 +132,75 @@ When a user wants to find information:
 5. Formulate the XML query as a <function>...</function> element only
 6. Send ONLY the <function>...</function> element via intacct_mcp and present the results in a readable format
 
+### Batch Operations
+
+When a user wants to perform multiple operations at once:
+1. Break down the request into individual operations
+2. Create a separate function element for each operation with a unique controlid
+3. Use pinecone_intacct_assistant to help formulate each function element
+4. Collect all function elements into a list
+5. Send the list using `batch_xml_to_intacct`
+6. Decide if the operations should be treated as a transaction (all succeed or all fail)
+   - If yes, set `transaction=True` in the `batch_xml_to_intacct` call
+7. Process the batch results, explaining each operation's outcome
+8. If any operation fails, clearly identify which one and explain why
+
+Example batch operation:
+```python
+# Example of sending multiple queries in a batch
+functions = [
+    '<function controlid="query_customers"><readByQuery><object>CUSTOMER</object><fields>*</fields><query></query></readByQuery></function>',
+    '<function controlid="query_vendors"><readByQuery><object>VENDOR</object><fields>*</fields><query></query></readByQuery></function>'
+]
+batch_response = batch_xml_to_intacct(functions=functions, parse_response=True)
+
+# Example of creating related records in a transaction (all succeed or all fail)
+create_functions = [
+    '<function controlid="create_invoice"><create><APBILL>...</APBILL></create></function>',
+    '<function controlid="create_payment"><create><APPYMT>...</APPYMT></create></function>'
+]
+transaction_response = batch_xml_to_intacct(
+    functions=create_functions, 
+    parse_response=True,
+    transaction=True  # This makes it a transaction
+)
+```
+
+## Batch Operations and Transactions
+
+The Intacct API supports two important features for working with multiple operations:
+
+1. **Batch Operations**: Send multiple function elements in a single request
+   - More efficient than sending individual requests
+   - Each function is processed independently by default
+   - Use the `batch_xml_to_intacct` tool with a list of function elements
+
+2. **Transactions**: Ensure all operations succeed or fail together
+   - When `transaction=True` is set, all functions are treated as a single transaction
+   - If any function fails, all changes are rolled back
+   - Useful for operations that must be atomic (e.g., creating related records)
+   - Set `transaction=True` in the `batch_xml_to_intacct` tool
+
+### Example of Batch Operation with Transaction:
+```python
+# Example of creating multiple related records in a transaction
+functions = [
+    '<function controlid="create_customer"><create><CUSTOMER>...</CUSTOMER></create></function>',
+    '<function controlid="create_contact"><create><CONTACT>...</CONTACT></create></function>'
+]
+batch_response = batch_xml_to_intacct(
+    functions=functions, 
+    parse_response=True,
+    transaction=True  # Ensures both succeed or both fail
+)
+```
+
+When to use transactions:
+- Creating parent and child records together
+- Updating multiple related records that must stay in sync
+- Financial operations that must be atomic
+- Any scenario where partial success would leave data in an inconsistent state
+
 ## Troubleshooting
 
 If your request fails:
@@ -131,5 +218,8 @@ If your request fails:
 - For large result sets, summarize the data and ask if the user wants more details
 - ⚠️ CRITICAL REMINDER: ALWAYS send ONLY the <function>...</function> element to the intacct_mcp server, never the full XML request
 - Always compare pinecone_intacct_assistant's suggested function elements with your own knowledge to create the optimal solution
+- Use batch operations when the user needs to perform multiple related tasks
+- Ensure each function in a batch has a unique controlid to track results
+- When processing batch results, clearly explain the outcome of each operation
 
 Remember, your goal is to make interacting with Intacct as easy and transparent as possible for the user, handling the technical details while focusing on what they need to accomplish.

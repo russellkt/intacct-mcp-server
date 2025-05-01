@@ -196,49 +196,97 @@ def check_response_status(parsed_response: Dict[str, Any]) -> Dict[str, Any]:
             "description": control.get("description", "Control status failure")
         }
     
-    # Check for top-level errormessage (outside of operation)
-    if "errormessage" in parsed_response:
-        error_msgs = parsed_response.get("errormessage", {})
-        if isinstance(error_msgs, dict) and "error" in error_msgs:
-            errors = error_msgs.get("error", [])
-            # Convert single error to list for consistent handling
-            if not isinstance(errors, list):
-                errors = [errors]
-            
-            if errors:
-                first_error = errors[0]
-                return {
-                    "success": False,
-                    "level": "request",
-                    "error_no": first_error.get("errorno"),
-                    "description": first_error.get("description2") or first_error.get("description"),
-                    "all_errors": errors
-                }
-    
-    # Get operation
+    # Check operation status
     operation = parsed_response.get("operation", {})
-    if not isinstance(operation, dict):
+    if isinstance(operation, dict) and operation.get("status") == "failure":
         return {
             "success": False,
             "level": "operation",
             "error_no": None,
-            "description": "Missing operation element in response"
+            "description": operation.get("description", "Operation status failure")
         }
     
     # Check authentication status
-    auth = operation.get("authentication", {})
-    if isinstance(auth, dict) and auth.get("status") != "success":
-        error = auth.get("error", {})
+    authentication = operation.get("authentication", {}) if isinstance(operation, dict) else {}
+    if isinstance(authentication, dict) and authentication.get("status") != "success":
         return {
             "success": False,
             "level": "authentication",
-            "error_no": error.get("errorno") if isinstance(error, dict) else None,
-            "description": error.get("description") if isinstance(error, dict) else "Authentication failure"
+            "error_no": None,
+            "description": authentication.get("description", "Authentication status failure")
         }
     
-    # Check result status
-    result = operation.get("result", {})
-    if not isinstance(result, dict):
+    # Check for batch response with multiple 'result' elements
+    if isinstance(operation, dict) and "result" in operation:
+        if isinstance(operation["result"], list):
+            # Multiple results in a list
+            all_errors = []
+            for idx, result in enumerate(operation["result"]):
+                if result.get("status") != "success":
+                    all_errors.append({
+                        "index": idx,
+                        "function": result.get("function", "unknown"),
+                        "controlid": result.get("controlid", "unknown"),
+                        "description": result.get("description", "Function status failure"),
+                        "error_no": result.get("errorno")
+                    })
+            
+            if all_errors:
+                return {
+                    "success": False,
+                    "level": "batch_result",
+                    "error_no": all_errors[0].get("error_no"),
+                    "description": f"Batch function failure: {all_errors[0].get('description')}",
+                    "all_errors": all_errors
+                }
+        elif isinstance(operation["result"], dict):
+            # Single result as a dict
+            result = operation["result"]
+            if result.get("status") != "success":
+                return {
+                    "success": False,
+                    "level": "batch_result",
+                    "error_no": result.get("errorno"),
+                    "description": result.get("description", "Function status failure")
+                }
+    
+    # Check for batch response with 'r' elements (alternative format)
+    if isinstance(operation, dict) and "r" in operation:
+        if isinstance(operation["r"], list):
+            # Multiple results in a list
+            all_errors = []
+            for idx, result in enumerate(operation["r"]):
+                if result.get("status") != "success":
+                    all_errors.append({
+                        "index": idx,
+                        "function": result.get("function", "unknown"),
+                        "controlid": result.get("controlid", "unknown"),
+                        "description": result.get("description", "Function status failure"),
+                        "error_no": result.get("errorno")
+                    })
+            
+            if all_errors:
+                return {
+                    "success": False,
+                    "level": "batch_result",
+                    "error_no": all_errors[0].get("error_no"),
+                    "description": f"Batch function failure: {all_errors[0].get('description')}",
+                    "all_errors": all_errors
+                }
+        elif isinstance(operation["r"], dict):
+            # Single result as a dict
+            result = operation["r"]
+            if result.get("status") != "success":
+                return {
+                    "success": False,
+                    "level": "batch_result",
+                    "error_no": result.get("errorno"),
+                    "description": result.get("description", "Function status failure")
+                }
+    
+    # If we got here and there's no result or r element in a batch context, that's an error
+    if isinstance(operation, dict) and "result" not in operation and "r" not in operation:
+        # This might be a batch request but missing the expected result structure
         return {
             "success": False,
             "level": "result",
@@ -246,34 +294,7 @@ def check_response_status(parsed_response: Dict[str, Any]) -> Dict[str, Any]:
             "description": "Missing result element in response"
         }
     
-    if result.get("status") != "success":
-        # Check for errormessage in result
-        error_msg = result.get("errormessage", {})
-        if isinstance(error_msg, dict) and "error" in error_msg:
-            errors = error_msg.get("error", [])
-            # Convert single error to list for consistent handling
-            if not isinstance(errors, list):
-                errors = [errors]
-            
-            if errors:
-                first_error = errors[0]
-                return {
-                    "success": False,
-                    "level": "result",
-                    "error_no": first_error.get("errorno"),
-                    "description": first_error.get("description2") or first_error.get("description"),
-                    "all_errors": errors
-                }
-        
-        # Fallback if no specific error found
-        return {
-            "success": False,
-            "level": "result",
-            "error_no": None,
-            "description": "Operation result failure"
-        }
-    
-    # All checks passed
+    # If we got here, all checks passed
     return {"success": True}
 
 def safe_parse_response(response_text):
@@ -289,7 +310,59 @@ def safe_parse_response(response_text):
         logger.error(error_msg)
         return False, None, error_msg
 
-def build_xml_request(credentials: IntacctCredentials, xml_content: str) -> str:
+def extract_batch_results(parsed_response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Extract results from a batch response
+    Returns a list of result dictionaries, one for each function in the batch
+    """
+    results = []
+    operation = parsed_response.get("operation", {})
+    
+    # Check for multiple result elements (standard format)
+    if isinstance(operation, dict) and "result" in operation:
+        if isinstance(operation["result"], list):
+            # Multiple results in a list
+            for result in operation["result"]:
+                results.append({
+                    "status": result.get("status"),
+                    "function": result.get("function"),
+                    "controlid": result.get("controlid"),
+                    "data": result.get("data")
+                })
+        elif isinstance(operation["result"], dict):
+            # Single result as a dict
+            result = operation["result"]
+            results.append({
+                "status": result.get("status"),
+                "function": result.get("function"),
+                "controlid": result.get("controlid"),
+                "data": result.get("data")
+            })
+    
+    # Check for r elements (alternative format)
+    elif isinstance(operation, dict) and "r" in operation:
+        if isinstance(operation["r"], list):
+            # Multiple results in a list
+            for result in operation["r"]:
+                results.append({
+                    "status": result.get("status"),
+                    "function": result.get("function"),
+                    "controlid": result.get("controlid"),
+                    "data": result.get("data")
+                })
+        elif isinstance(operation["r"], dict):
+            # Single result as a dict
+            result = operation["r"]
+            results.append({
+                "status": result.get("status"),
+                "function": result.get("function"),
+                "controlid": result.get("controlid"),
+                "data": result.get("data")
+            })
+    
+    return results
+
+def build_xml_request(credentials: IntacctCredentials, xml_content: str, transaction: bool = False) -> str:
     """Build an XML request with authentication"""
     # Determine authentication method
     if credentials.get("session_id"):
@@ -316,6 +389,9 @@ def build_xml_request(credentials: IntacctCredentials, xml_content: str) -> str:
     # Create control ID for this request
     control_id = str(uuid.uuid4())
     
+    # Add transaction attribute if specified
+    transaction_attr = ' transaction="true"' if transaction else ''
+    
     # Build the full XML request - matching the format in the debug script
     xml_request = f"""
     <request>
@@ -326,7 +402,7 @@ def build_xml_request(credentials: IntacctCredentials, xml_content: str) -> str:
             <uniqueid>false</uniqueid>
             <dtdversion>{DTD_VERSION}</dtdversion>
         </control>
-        <operation>
+        <operation{transaction_attr}>
             {auth_xml}
             <content>
                 {xml_content}
@@ -428,19 +504,15 @@ async def post_xml_to_intacct(
         status_check = check_response_status(parsed_response)
         if not status_check["success"]:
             error_msg = f"API Error ({status_check['level']}): {status_check['description']}"
-            if status_check["error_no"]:
+            if status_check['error_no']:
                 error_msg += f" (Error code: {status_check['error_no']})"
-            
-            # Add user-friendly message for common error codes
-            if status_check.get("error_no") == "PL04000005":
-                error_msg += "\n\nThis appears to be a permissions issue. The user account does not have sufficient permissions to perform this operation on this object type."
             
             # Include all errors if available
             all_errors = status_check.get("all_errors", [])
             if all_errors and len(all_errors) > 1:
                 error_details = []
                 for i, err in enumerate(all_errors[:5]):  # Limit to first 5 errors
-                    desc = err.get("description2") or err.get("description") or "Unknown error"
+                    desc = err.get("description") or "Unknown error"
                     error_details.append(f"{i+1}. {desc}")
                 
                 if error_details:
@@ -448,13 +520,15 @@ async def post_xml_to_intacct(
             
             return {"status": "error", "message": error_msg, "raw_response": response_text}
         
+        if ctx:
+            await ctx.info("Received successful response from Intacct")
+        
         # Return response based on parse_response flag
         if parse_response:
             if ctx:
                 await ctx.info("Parsing XML response to dictionary")
             return {
                 "status": "success",
-                "xml_response": response_text,
                 "parsed_response": parsed_response
             }
         else:
@@ -800,6 +874,7 @@ async def batch_xml_to_intacct(
     functions: List[str],
     credentials: Optional[dict] = None,
     parse_response: bool = False,
+    transaction: bool = False,
     ctx: Context = None
 ) -> Dict[str, Any]:
     """
@@ -809,6 +884,7 @@ async def batch_xml_to_intacct(
         functions: List of XML function strings to be executed in a batch
         credentials: Optional override for Intacct credentials
         parse_response: Whether to parse the XML response into JSON
+        transaction: Whether to treat all functions as a single transaction (if one fails, all are rolled back)
         ctx: MCP context object
     
     Returns:
@@ -821,15 +897,63 @@ async def batch_xml_to_intacct(
         # Combine functions into a single content block
         batch_content = "\n".join(functions)
         
-        # Use the existing post_xml_to_intacct function
-        return await post_xml_to_intacct(
-            batch_content,
-            merged_credentials,
-            parse_response,
-            ctx
+        if ctx:
+            await ctx.info(f"Sending batch request with {len(functions)} functions" + 
+                          (", as a transaction" if transaction else ""))
+        
+        # Build and send request with transaction attribute if specified
+        xml_request = build_xml_request(merged_credentials, batch_content, transaction)
+        response_text = send_to_intacct(
+            xml_request, 
+            merged_credentials.get("endpoint", INTACCT_ENDPOINT)
         )
+        
+        # Parse the XML response to a dictionary
+        success, parsed_response, error_msg = safe_parse_response(response_text)
+        if not success:
+            return {"status": "error", "message": error_msg}
+        
+        # Check response status at various levels
+        status_check = check_response_status(parsed_response)
+        if not status_check["success"]:
+            error_msg = f"API Error ({status_check['level']}): {status_check['description']}"
+            if status_check["error_no"]:
+                error_msg += f" (Error code: {status_check['error_no']})"
+            
+            # Include all errors if available
+            all_errors = status_check.get("all_errors", [])
+            if all_errors and len(all_errors) > 1:
+                error_details = []
+                for i, err in enumerate(all_errors[:5]):  # Limit to first 5 errors
+                    desc = err.get("description") or "Unknown error"
+                    error_details.append(f"{i+1}. {desc}")
+                
+                if error_details:
+                    error_msg += "\n\nAdditional errors:\n" + "\n".join(error_details)
+            
+            return {"status": "error", "message": error_msg, "raw_response": response_text}
+        
+        if ctx:
+            await ctx.info("Received successful response from Intacct")
+        
+        # Return response based on parse_response flag
+        if parse_response:
+            if ctx:
+                await ctx.info("Parsing batch XML response to dictionary")
+            
+            # Extract individual results from the batch response
+            batch_results = extract_batch_results(parsed_response)
+            
+            return {
+                "status": "success",
+                "batch_results": batch_results
+            }
+        else:
+            return {"status": "success", "xml_response": response_text}
+    
     except Exception as e:
-        return handle_intacct_error(e, "batch request")
+        logger.error(f"Error in batch request: {str(e)}")
+        return {"status": "error", "message": f"Error in batch request: {str(e)}"}
 
 # Run the server
 if __name__ == "__main__":
