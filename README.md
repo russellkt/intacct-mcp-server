@@ -132,6 +132,132 @@ Example request:
 }
 ```
 
+## Batch Operations and Transactions
+
+The Intacct API supports sending multiple function elements in a single request, which can improve performance when you need to execute multiple operations.
+
+### Basic Batch Operations
+
+To send multiple operations in a single request, use the `batch_xml_to_intacct` tool with an array of function elements:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "tools/batch_xml_to_intacct",
+  "params": {
+    "functions": [
+      "<function controlid=\"query1\"><query><object>VENDOR</object><select><field>VENDORID</field><field>NAME</field></select></query></function>",
+      "<function controlid=\"query2\"><query><object>APBILL</object><select><field>RECORDNO</field><field>VENDORNAME</field></select></query></function>"
+    ],
+    "parse_response": true
+  }
+}
+```
+
+### Transaction Support
+
+When creating or updating related records, you can ensure all operations succeed or fail together by using the `transaction` parameter:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "tools/batch_xml_to_intacct",
+  "params": {
+    "functions": [
+      "<function controlid=\"create1\"><create><VENDOR>...</VENDOR></create></function>",
+      "<function controlid=\"create2\"><create><CONTACT>...</CONTACT></create></function>"
+    ],
+    "parse_response": true,
+    "transaction": true
+  }
+}
+```
+
+When `transaction` is set to `true`, all functions are treated as a single transaction. If any function fails, all changes are rolled back, ensuring data consistency.
+
+## Limitations
+
+### Data Passing Between Functions
+
+Intacct does not support passing data between functions in the same batch request. Each function in a batch is processed independently, and there's no way for one function to use the results of another function in the same request.
+
+If you need to use the results from one operation to inform another operation, you must:
+1. Send the first request
+2. Process the response in your application
+3. Use that data to construct a second request
+4. Send the second request separately
+
+### Query Pagination
+
+For queries that return large result sets, Intacct uses pagination. The default page size is typically 100 records, but you can specify a different page size using the `pagesize` element in your query.
+
+To retrieve additional pages, you'll need to use the `offset` parameter in subsequent queries or use the `readMore` function with the `resultId` from the previous response.
+
+## Response Format
+
+When using the MCP tools, you can control the response format using the `parse_response` parameter:
+
+### XML Response (Default)
+
+When `parse_response` is set to `false` (default), the response will contain only the raw XML:
+
+```json
+{
+  "status": "success",
+  "xml_response": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>..."
+}
+```
+
+### JSON Response
+
+When `parse_response` is set to `true`, the response will contain only the parsed JSON structure:
+
+```json
+{
+  "status": "success",
+  "parsed_response": {
+    "control": {...},
+    "operation": {...}
+  }
+}
+```
+
+For batch operations, the response will include an array of results:
+
+```json
+{
+  "status": "success",
+  "batch_results": [
+    {
+      "status": "success",
+      "function": "query",
+      "controlid": "query1",
+      "data": {...}
+    },
+    {
+      "status": "success",
+      "function": "query",
+      "controlid": "query2",
+      "data": {...}
+    }
+  ]
+}
+```
+
+### Error Responses
+
+Error responses will include an error message and, for debugging purposes, may include the raw XML response:
+
+```json
+{
+  "status": "error",
+  "message": "API Error (authentication): Authentication failed",
+  "raw_response": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>..."
+}
+```
+
 ## Integration with Claude Desktop
 
 To use this MCP server with Claude Desktop:
@@ -160,6 +286,12 @@ This file tells Claude Desktop how to launch the server and what capabilities it
 
 ## Troubleshooting
 
-- Check the `intacct_mcp.log` file for detailed error messages
-- Make sure your Intacct credentials are correct
-- Verify that your XML content is properly formatted
+If you encounter issues with the MCP server or Intacct API:
+
+1. Check the `logs/intacct_mcp.log` file for detailed error messages
+2. Verify your Intacct credentials in the `.env` file
+3. Ensure your XML content follows the correct format (only the `<function>` element)
+4. For authentication issues, try getting a new session using `get_intacct_session`
+5. Use the `test_intacct_connection` tool to diagnose connectivity problems
+
+For more detailed troubleshooting information, use the `tools/get_troubleshooting` method.
