@@ -196,6 +196,25 @@ def check_response_status(parsed_response: Dict[str, Any]) -> Dict[str, Any]:
             "description": control.get("description", "Control status failure")
         }
     
+    # Check for top-level errormessage (outside of operation)
+    if "errormessage" in parsed_response:
+        error_msgs = parsed_response.get("errormessage", {})
+        if isinstance(error_msgs, dict) and "error" in error_msgs:
+            errors = error_msgs.get("error", [])
+            # Convert single error to list for consistent handling
+            if not isinstance(errors, list):
+                errors = [errors]
+            
+            if errors:
+                first_error = errors[0]
+                return {
+                    "success": False,
+                    "level": "request",
+                    "error_no": first_error.get("errorno"),
+                    "description": first_error.get("description2") or first_error.get("description"),
+                    "all_errors": errors
+                }
+    
     # Get operation
     operation = parsed_response.get("operation", {})
     if not isinstance(operation, dict):
@@ -228,13 +247,30 @@ def check_response_status(parsed_response: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     if result.get("status") != "success":
+        # Check for errormessage in result
         error_msg = result.get("errormessage", {})
-        error = error_msg.get("error", {}) if isinstance(error_msg, dict) else {}
+        if isinstance(error_msg, dict) and "error" in error_msg:
+            errors = error_msg.get("error", [])
+            # Convert single error to list for consistent handling
+            if not isinstance(errors, list):
+                errors = [errors]
+            
+            if errors:
+                first_error = errors[0]
+                return {
+                    "success": False,
+                    "level": "result",
+                    "error_no": first_error.get("errorno"),
+                    "description": first_error.get("description2") or first_error.get("description"),
+                    "all_errors": errors
+                }
+        
+        # Fallback if no specific error found
         return {
             "success": False,
             "level": "result",
-            "error_no": error.get("errorno") if isinstance(error, dict) else None,
-            "description": error.get("description") if isinstance(error, dict) else "Operation result failure"
+            "error_no": None,
+            "description": "Operation result failure"
         }
     
     # All checks passed
@@ -337,7 +373,9 @@ async def post_xml_to_intacct(
     Posts XML content to Intacct with proper authentication
     
     Args:
-        xml_content: XML content to be wrapped with authentication and sent to Intacct
+        xml_content: ONLY the <function>...</function> element block. DO NOT include full XML request
+                    with authentication elements. The server will automatically wrap your function
+                    element with the proper authentication and request structure.
         credentials: Optional override for Intacct credentials (sender_id, sender_password, etc.).
                     If not provided, values from environment variables will be used.
         parse_response: Whether to parse the XML response into JSON
@@ -345,6 +383,18 @@ async def post_xml_to_intacct(
     
     Returns:
         Dict containing the response from Intacct
+    
+    Example:
+        Correct usage:
+        ```xml
+        <function controlid="query1">
+          <readByQuery>
+            <object>CUSTOMER</object>
+            <fields>*</fields>
+            <query></query>
+          </readByQuery>
+        </function>
+        ```
     """
     try:
         # Merge credentials
@@ -352,7 +402,7 @@ async def post_xml_to_intacct(
         
         # Log progress (visible in MCP Inspector)
         if ctx:
-            ctx.info("Building XML request with authentication")
+            await ctx.info("Building XML request with authentication")
         
         # Validate XML content
         if not xml_content:
@@ -362,7 +412,7 @@ async def post_xml_to_intacct(
         xml_request = build_xml_request(merged_credentials, xml_content)
         
         if ctx:
-            ctx.info("Sending request to Intacct API")
+            await ctx.info("Sending request to Intacct API")
         
         response_text = send_to_intacct(
             xml_request, 
@@ -380,22 +430,39 @@ async def post_xml_to_intacct(
             error_msg = f"API Error ({status_check['level']}): {status_check['description']}"
             if status_check["error_no"]:
                 error_msg += f" (Error code: {status_check['error_no']})"
-            return {"status": "error", "message": error_msg}
+            
+            # Add user-friendly message for common error codes
+            if status_check.get("error_no") == "PL04000005":
+                error_msg += "\n\nThis appears to be a permissions issue. The user account does not have sufficient permissions to perform this operation on this object type."
+            
+            # Include all errors if available
+            all_errors = status_check.get("all_errors", [])
+            if all_errors and len(all_errors) > 1:
+                error_details = []
+                for i, err in enumerate(all_errors[:5]):  # Limit to first 5 errors
+                    desc = err.get("description2") or err.get("description") or "Unknown error"
+                    error_details.append(f"{i+1}. {desc}")
+                
+                if error_details:
+                    error_msg += "\n\nAdditional errors:\n" + "\n".join(error_details)
+            
+            return {"status": "error", "message": error_msg, "raw_response": response_text}
         
         # Return response based on parse_response flag
         if parse_response:
             if ctx:
-                ctx.info("Parsing XML response to dictionary")
+                await ctx.info("Parsing XML response to dictionary")
             return {
+                "status": "success",
                 "xml_response": response_text,
                 "parsed_response": parsed_response
             }
         else:
-            return {"xml_response": response_text}
+            return {"status": "success", "xml_response": response_text}
     
     except Exception as e:
         logger.error(f"Error posting to Intacct: {str(e)}")
-        raise Exception(f"Error posting to Intacct: {str(e)}")
+        return {"status": "error", "message": f"Error posting to Intacct: {str(e)}"}
 
 @mcp.tool()
 async def get_intacct_session(
